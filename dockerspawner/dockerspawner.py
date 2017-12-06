@@ -143,7 +143,7 @@ class DockerSpawner(Spawner):
     )
 
     container_prefix = Unicode(
-        "jupyter",
+        "wodeai",
         config=True,
         help=dedent(
             """
@@ -154,11 +154,11 @@ class DockerSpawner(Spawner):
     )
 
     container_name_template = Unicode(
-        "{prefix}-{username}",
+        "{username}-{servername}",
         config=True,
         help=dedent(
             """
-            Name of the container: with {username}, {imagename}, {prefix} replacements.
+            Name of the container: with {username}, {imagename}, {prefix}, {servername} replacements.
             The default container_name_template is <prefix>-<username> for backward compatibility
             """
         )
@@ -429,6 +429,27 @@ class DockerSpawner(Spawner):
         """
         return self.executor.submit(self._docker, method, *args, **kwargs)
 
+    
+    @gen.coroutine
+    def _status(self):
+        container = yield self.get_container()
+        if not container:
+            self.log.warn("container not found")
+            return 0
+
+        container_state = container['State']
+        self.log.debug(
+            "Container %s status: %s",
+            self.container_id[:7],
+            pformat(container_state),
+        )
+        container = yield self.get_container()
+        if not container:
+            self.log.warn("container not found")
+            return {"status":"container not found"}
+        container_state = container['State']
+        return {"status":pformat(container_state)}
+    
     @gen.coroutine
     def poll(self):
         """Check for my id in `docker ps`"""
@@ -475,7 +496,29 @@ class DockerSpawner(Spawner):
             else:
                 raise
         return container
-
+    
+    @gen.coroutine
+    def _logs_container(self):
+        self.log.debug("Getting container '%s'", self.container_name)
+        try:
+            logs = yield self.docker(
+                'logs', self.container_name
+            )
+        except APIError as e:
+            if e.response.status_code == 404:
+                self.log.info("Container '%s' is gone", self.container_name)
+                container = None
+                # my container is gone, forget my id
+                self.container_id = ''
+            elif e.response.status_code == 500:
+                self.log.info("Container '%s' is on unhealthy node", self.container_name)
+                container = None
+                # my container is unhealthy, forget my id
+                self.container_id = ''
+            else:
+                raise
+        return logs
+    
     @gen.coroutine
     def start(self, image=None, extra_create_kwargs=None,
         extra_start_kwargs=None, extra_host_config=None):
@@ -489,7 +532,7 @@ class DockerSpawner(Spawner):
         Per-instance `extra_create_kwargs`, `extra_start_kwargs`, and
         `extra_host_config` take precedence over their global counterparts.
 
-        """
+        """ 
         container = yield self.get_container()
         if container and self.remove_containers:
             self.log.warning(
@@ -502,12 +545,18 @@ class DockerSpawner(Spawner):
         if container is None:
             image = image or self.image
             if self._user_set_cmd:
-                cmd = self.cmd
+                cmd = self.cmd[0]
             else:
-                image_info = yield self.docker('inspect_image', image)
-                cmd = image_info['Config']['Cmd']
-            cmd = cmd + self.get_args()
+                try:
+                    image_info = yield self.docker('inspect_image', image)
+                    cmd = image_info['Config']['Cmd']
+                    cmd = cmd + self.get_args()
+                except docker.errors.ImageNotFound as inf:
+                    self.log.error("Failed to find the requested image {}".format(image))
+                    raise RuntimeError("Failed to find the requested image {}".format(image))
+                
 
+            print("~~~~cmd~~~~"+str(cmd))
             # build the dictionary of keyword arguments for create_container
             create_kwargs = dict(
                 image=image,
@@ -516,7 +565,7 @@ class DockerSpawner(Spawner):
                 name=self.container_name,
                 command=cmd,
             )
-
+            
             # ensure internal port is exposed
             create_kwargs['ports'] = {'%i/tcp' % self.port: None}
 
@@ -545,7 +594,7 @@ class DockerSpawner(Spawner):
 
             host_config = self.client.create_host_config(**host_config)
             create_kwargs.setdefault('host_config', {}).update(host_config)
-
+            
             # create the container
             resp = yield self.docker('create_container', **create_kwargs)
             self.container_id = resp['Id']
@@ -575,7 +624,7 @@ class DockerSpawner(Spawner):
         start_kwargs.update(self.extra_start_kwargs)
         if extra_start_kwargs:
             start_kwargs.update(extra_start_kwargs)
-
+        
         # start the container
         yield self.docker('start', self.container_id, **start_kwargs)
 
