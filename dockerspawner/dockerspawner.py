@@ -497,6 +497,29 @@ class DockerSpawner(Spawner):
                 raise
         return container
     
+    
+    @gen.coroutine
+    def _stats_container(self):
+        self.log.debug("Getting container '%s'", self.container_name)
+        try:
+            stats = yield self.docker(
+                'stats', self.container_name, stream=False
+            )
+        except APIError as e:
+            if e.response.status_code == 404:
+                self.log.info("Container '%s' is gone", self.container_name)
+                container = None
+                # my container is gone, forget my id
+                self.container_id = ''
+            elif e.response.status_code == 500:
+                self.log.info("Container '%s' is on unhealthy node", self.container_name)
+                container = None
+                # my container is unhealthy, forget my id
+                self.container_id = ''
+            else:
+                raise
+        return stats
+    
     @gen.coroutine
     def _logs_container(self):
         self.log.debug("Getting container '%s'", self.container_name)
