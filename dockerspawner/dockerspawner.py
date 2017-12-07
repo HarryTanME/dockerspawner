@@ -9,6 +9,7 @@ from textwrap import dedent
 import warnings
 
 import docker
+import os,shutil
 from docker.errors import APIError
 from docker.utils import kwargs_from_env
 from tornado import gen
@@ -704,6 +705,34 @@ class DockerSpawner(Spawner):
         return ip
 
     @gen.coroutine
+    def cleanup_before_stop(self):
+        container = yield self.get_container()
+        container_id=container['Id']
+        session_path = os.path.join(self.session_outputs_path,container_id)
+        
+        if not os.path.exists(session_path):
+            os.mkdir(session_path)
+        if not os.path.exists(os.path.join(session_path,"logs")):
+            os.mkdir(os.path.join(session_path,"logs"))
+        if not os.path.exists(os.path.join(session_path,"outputs")):
+            os.mkdir(os.path.join(session_path,"outputs"))
+        if not os.path.exists(os.path.join(session_path,"stats")):
+            os.mkdir(os.path.join(session_path,"stats"))
+        #copy logs file
+        logpath  = container['LogPath']
+        with open(os.path.join(session_path,"containerinfo.txt"),"w") as ff:
+            ff.write(str(container))
+        logs_str = yield self._logs_container()
+        print(logs_str[:100])
+        with open(os.path.join(session_path,"logs")+"/logs.txt","w") as ff:
+            ff.write(str(logs_str))
+        statst_str = yield self._stats_container()
+        with open(os.path.join(session_path,"stats")+"/stats.json","w") as ff:
+            ff.write(str(statst_str))
+        self.log.info("Finished cleaning up.")  
+        print("~~~container_id:"+str(container_id))  
+    
+    @gen.coroutine
     def stop(self, now=False):
         """Stop the container
 
@@ -713,7 +742,8 @@ class DockerSpawner(Spawner):
             "Stopping container %s (id: %s)",
             self.container_name, self.container_id[:7])
         yield self.docker('stop', self.container_id)
-
+        yield self.cleanup_before_stop()
+        
         if self.remove_containers:
             self.log.info(
                 "Removing container %s (id: %s)",
