@@ -7,6 +7,7 @@ from pprint import pformat
 import string
 from textwrap import dedent
 import warnings
+import datetime
 
 import docker
 import os,shutil
@@ -39,7 +40,8 @@ import jupyterhub
 _jupyterhub_xy = '%i.%i' % (jupyterhub.version_info[:2])
 
 class DockerSpawner(Spawner):
-
+    
+    
     _executor = None
     @property
     def executor(self):
@@ -73,6 +75,16 @@ class DockerSpawner(Spawner):
         self._user_set_cmd = True
 
     container_id = Unicode()
+    
+    
+    
+    
+    @property
+    def stats_history(self):
+        """The collected container stats at each poll interval, 30secs by default. """
+        if not hasattr(self, '_stats_history'):
+            setattr(self, '_stats_history', [])
+        return self._stats_history
     
     # deprecate misleading container_ip, since
     # it is not the ip in the container,
@@ -155,7 +167,7 @@ class DockerSpawner(Spawner):
     )
 
     container_name_template = Unicode(
-        "{username}-{servername}",
+        "{prefix}-{username}-{servername}",
         config=True,
         help=dedent(
             """
@@ -449,7 +461,16 @@ class DockerSpawner(Spawner):
             self.log.warn("container not found")
             return {"status":"container not found"}
         container_state = container['State']
-        return {"status":pformat(container_state)}
+        return {"status":container_state}
+    
+
+    def calcKeyStats(self, docker_stats):
+        cpuDelta = docker_stats['cpu_stats']['cpu_usage']['total_usage'] -  docker_stats['precpu_stats']['cpu_usage']['total_usage']
+        systemDelta = docker_stats['cpu_stats']['system_cpu_usage'] - docker_stats['precpu_stats']['system_cpu_usage']
+        cpu_usage = cpuDelta / systemDelta * 100
+        ram_usage = docker_stats['memory_stats']['usage'] /(1024**3) # conver to MegaBytes
+        ram_limit = docker_stats['memory_stats']['limit'] /(1024**3)
+        return {"timestamp":datetime.datetime.now().isoformat(), "cpu_usage":cpu_usage,"ram_usage":ram_usage, "ram_limit":ram_limit}
     
     @gen.coroutine
     def poll(self):
@@ -465,7 +486,12 @@ class DockerSpawner(Spawner):
             self.container_id[:7],
             pformat(container_state),
         )
-
+        #collect container stats.
+        stats = yield self._stats_container()
+        key_stats = self.calcKeyStats(stats)
+        
+        self.stats_history.append(key_stats)
+        
         if container_state["Running"]:
             return None
         else:
@@ -579,15 +605,18 @@ class DockerSpawner(Spawner):
                     self.log.error("Failed to find the requested image {}".format(image))
                     raise RuntimeError("Failed to find the requested image {}".format(image))
                 
-
-            print("~~~~cmd~~~~"+str(cmd))
+            if "pre-cmd" in self.user_options:
+                cmd = self.user_options["pre-cmd"].strip() +" ".join(cmd)
+                
+            final_cmd='/bin/bash -c "{}"'.format(" ".join(cmd) if type(cmd)==type([]) else cmd) 
+            print("~~~~cmd~~~~"+str(final_cmd))
             # build the dictionary of keyword arguments for create_container
             create_kwargs = dict(
                 image=image,
                 environment=self.get_env(),
                 volumes=self.volume_mount_points,
                 name=self.container_name,
-                command=cmd,
+                command=final_cmd,
             )
             
             # ensure internal port is exposed
@@ -726,7 +755,7 @@ class DockerSpawner(Spawner):
         print(logs_str[:100])
         with open(os.path.join(session_path,"logs")+"/logs.txt","w") as ff:
             ff.write(str(logs_str))
-        statst_str = yield self._stats_container()
+        statst_str = self.stats_history
         with open(os.path.join(session_path,"stats")+"/stats.json","w") as ff:
             ff.write(str(statst_str))
         self.log.info("Finished cleaning up.")  
@@ -742,6 +771,7 @@ class DockerSpawner(Spawner):
             "Stopping container %s (id: %s)",
             self.container_name, self.container_id[:7])
         yield self.docker('stop', self.container_id)
+        
         yield self.cleanup_before_stop()
         
         if self.remove_containers:
